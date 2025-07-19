@@ -1,12 +1,10 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { blink } from '../blink/client'
 import { Button } from './ui/button'
-import { Textarea } from './ui/textarea'
 import { Input } from './ui/input'
-import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
+import { Card, CardContent } from './ui/card'
 import { Badge } from './ui/badge'
-import { Separator } from './ui/separator'
-import { Sparkles, Clock, MapPin, DollarSign, Send, Mic, MicOff, MessageCircle, Bot, User } from 'lucide-react'
+import { Sparkles, Send, Mic, MicOff, Bot, User, MapPin, DollarSign, Clock, ArrowRight, Zap } from 'lucide-react'
 import { ProviderMatches } from './ProviderMatches'
 
 interface RequestFlowProps {
@@ -14,9 +12,11 @@ interface RequestFlowProps {
 }
 
 interface Message {
-  type: 'user' | 'ai'
+  type: 'user' | 'ai' | 'system'
   content: string
   timestamp: Date
+  suggestions?: string[]
+  data?: any
 }
 
 interface ScopingData {
@@ -37,24 +37,45 @@ interface ParsedRequest {
   description: string
 }
 
+const quickStarters = [
+  { text: "I need help with trash removal", icon: "🗑️" },
+  { text: "Looking for a photographer", icon: "📸" },
+  { text: "Need apartment cleaning", icon: "🧹" },
+  { text: "WiFi setup help", icon: "📶" },
+  { text: "Moving assistance", icon: "📦" },
+  { text: "Graphic design work", icon: "🎨" }
+]
+
 export function RequestFlow({ user }: RequestFlowProps) {
   const [inputText, setInputText] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
   const [scopingData, setScopingData] = useState<ScopingData>({})
-  const [currentQuestion, setCurrentQuestion] = useState<string | null>(null)
   const [isComplete, setIsComplete] = useState(false)
   const [parsedRequest, setParsedRequest] = useState<ParsedRequest | null>(null)
   const [requestId, setRequestId] = useState<string | null>(null)
   const [isListening, setIsListening] = useState(false)
-  const [showChat, setShowChat] = useState(false)
+  const [showWelcome, setShowWelcome] = useState(true)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  const exampleRequests = [
-    "I need help taking out my trash",
-    "Looking for a photographer", 
-    "Need someone to clean my apartment",
-    "Help me set up my WiFi"
-  ]
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  useEffect(() => {
+    if (showWelcome) {
+      // Add welcome message after a short delay
+      setTimeout(() => {
+        const welcomeMessage: Message = {
+          type: 'ai',
+          content: "Hi! I'm your AI assistant. Tell me what you need help with, and I'll find you the perfect local provider. What can I help you with today?",
+          timestamp: new Date(),
+          suggestions: quickStarters.map(s => s.text)
+        }
+        setMessages([welcomeMessage])
+      }, 500)
+    }
+  }, [showWelcome])
 
   const handleVoiceInput = () => {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
@@ -69,55 +90,60 @@ export function RequestFlow({ user }: RequestFlowProps) {
     recognition.interimResults = false
     recognition.lang = 'en-US'
 
-    recognition.onstart = () => {
-      setIsListening(true)
-    }
-
+    recognition.onstart = () => setIsListening(true)
     recognition.onresult = (event) => {
       const transcript = event.results[0][0].transcript
-      setInputText(prev => prev + ' ' + transcript)
+      setInputText(transcript)
       setIsListening(false)
     }
-
-    recognition.onerror = () => {
-      setIsListening(false)
-    }
-
-    recognition.onend = () => {
-      setIsListening(false)
-    }
+    recognition.onerror = () => setIsListening(false)
+    recognition.onend = () => setIsListening(false)
 
     recognition.start()
   }
 
-  const handleSubmit = async () => {
-    if (!inputText.trim()) return
+  const handleSubmit = async (text?: string) => {
+    const messageText = text || inputText
+    if (!messageText.trim()) return
+    
+    setShowWelcome(false)
     
     const userMessage: Message = {
       type: 'user',
-      content: inputText,
+      content: messageText,
       timestamp: new Date()
     }
     
     setMessages(prev => [...prev, userMessage])
     setIsProcessing(true)
-    setShowChat(true)
+    setInputText('')
     
     try {
-      // Simulate AI processing
-      await new Promise(resolve => setTimeout(resolve, 1500))
+      // Add thinking indicator
+      const thinkingMessage: Message = {
+        type: 'system',
+        content: 'thinking',
+        timestamp: new Date()
+      }
+      setMessages(prev => [...prev, thinkingMessage])
       
-      const aiResponse = await processUserInput(inputText, scopingData)
+      await new Promise(resolve => setTimeout(resolve, 1200))
+      
+      const aiResponse = await processUserInput(messageText, scopingData)
+      
+      // Remove thinking indicator and add AI response
+      setMessages(prev => prev.filter(m => m.content !== 'thinking'))
       
       const aiMessage: Message = {
         type: 'ai',
         content: aiResponse.message,
-        timestamp: new Date()
+        timestamp: new Date(),
+        suggestions: aiResponse.suggestions,
+        data: aiResponse.data
       }
       
       setMessages(prev => [...prev, aiMessage])
       setScopingData(aiResponse.updatedData)
-      setCurrentQuestion(aiResponse.nextQuestion)
       
       if (aiResponse.isComplete) {
         setIsComplete(true)
@@ -129,7 +155,7 @@ export function RequestFlow({ user }: RequestFlowProps) {
         const newRequest = await blink.db.requests.create({
           id: `req_${Date.now()}`,
           userId: user.id,
-          inputText: aiResponse.updatedData.details || inputText,
+          inputText: aiResponse.updatedData.details || messageText,
           parsedTaskType: finalRequest.taskType,
           parsedSkills: JSON.stringify(finalRequest.skills),
           parsedLocation: finalRequest.location,
@@ -144,44 +170,63 @@ export function RequestFlow({ user }: RequestFlowProps) {
       
     } catch (error) {
       console.error('Error processing request:', error)
+      setMessages(prev => prev.filter(m => m.content !== 'thinking'))
+      const errorMessage: Message = {
+        type: 'ai',
+        content: "I'm sorry, I encountered an error. Could you please try again?",
+        timestamp: new Date()
+      }
+      setMessages(prev => [...prev, errorMessage])
     } finally {
       setIsProcessing(false)
-      setInputText('')
     }
   }
 
   const processUserInput = async (userInput: string, currentData: ScopingData) => {
-    const lowerInput = userInput.toLowerCase()
     const updatedData = { ...currentData }
     
-    // First message - extract initial task type
-    if (messages.length === 0) {
+    // First message - extract initial task type and any provided details
+    if (messages.length <= 1) {
       updatedData.taskType = extractTaskType(userInput)
       updatedData.details = userInput
       
-      // Check if we need more details
+      // Extract any details already provided
+      const extractedLocation = extractLocation(userInput)
+      const extractedBudget = extractBudget(userInput)
+      const extractedTimeline = extractTimeline(userInput)
+      
+      if (extractedLocation) updatedData.location = extractedLocation
+      if (extractedBudget) updatedData.budget = extractedBudget
+      if (extractedTimeline) updatedData.timeline = extractedTimeline
+      
+      // Check what's missing
       const missingInfo = getMissingInfo(updatedData, userInput)
       
       if (missingInfo.length > 0) {
-        const nextQuestion = getNextQuestion(missingInfo[0])
+        const nextQuestion = getNextQuestion(missingInfo[0], updatedData.taskType)
+        const suggestions = getQuestionSuggestions(missingInfo[0], updatedData.taskType)
+        
         return {
-          message: `Got it! I understand you need help with ${updatedData.taskType.toLowerCase()}. ${nextQuestion}`,
+          message: `Perfect! I understand you need ${updatedData.taskType?.toLowerCase()}. ${nextQuestion}`,
           updatedData,
-          nextQuestion: missingInfo[0],
+          suggestions,
           isComplete: false
         }
       } else {
         // All info provided in first message
         return {
-          message: `Perfect! I have all the details I need. Let me find the best providers for your ${updatedData.taskType.toLowerCase()} request. This should take just a moment...`,
+          message: `Excellent! I have everything I need. Let me find the best ${updatedData.taskType?.toLowerCase()} providers in your area...`,
           updatedData,
-          nextQuestion: null,
+          suggestions: [],
           isComplete: true
         }
       }
     }
     
-    // Process based on current question
+    // Process subsequent responses
+    const missingBefore = getMissingInfo(currentData, currentData.details || '')
+    const currentQuestion = missingBefore[0]
+    
     if (currentQuestion === 'location') {
       updatedData.location = userInput
     } else if (currentQuestion === 'budget') {
@@ -196,19 +241,23 @@ export function RequestFlow({ user }: RequestFlowProps) {
     const missingInfo = getMissingInfo(updatedData, updatedData.details || '')
     
     if (missingInfo.length > 0) {
-      const nextQuestion = getNextQuestion(missingInfo[0])
+      const nextQuestion = getNextQuestion(missingInfo[0], updatedData.taskType)
+      const suggestions = getQuestionSuggestions(missingInfo[0], updatedData.taskType)
+      
       return {
-        message: `Great! ${nextQuestion}`,
+        message: `Got it! ${nextQuestion}`,
         updatedData,
-        nextQuestion: missingInfo[0],
+        suggestions,
         isComplete: false
       }
     } else {
-      // All info collected
+      // All info collected - show summary and proceed
+      const summary = generateSummary(updatedData)
       return {
-        message: `Excellent! I now have all the information needed to find you the perfect provider. Let me search for qualified ${updatedData.taskType?.toLowerCase()} professionals in your area...`,
+        message: `Perfect! Here's what I understand:\n\n${summary}\n\nLet me find you the best providers...`,
         updatedData,
-        nextQuestion: null,
+        suggestions: [],
+        data: { summary: updatedData },
         isComplete: true
       }
     }
@@ -217,36 +266,22 @@ export function RequestFlow({ user }: RequestFlowProps) {
   const getMissingInfo = (data: ScopingData, originalText: string) => {
     const missing = []
     
-    if (!data.location || data.location === 'Not specified') {
-      if (!originalText.toLowerCase().includes('location') && 
-          !originalText.toLowerCase().includes('address') &&
-          !originalText.toLowerCase().includes('home') &&
-          !originalText.toLowerCase().includes('apartment')) {
-        missing.push('location')
-      }
+    if (!data.location) {
+      missing.push('location')
     }
     
     if (!data.budget) {
-      if (!originalText.match(/\$\d+/)) {
-        missing.push('budget')
-      }
+      missing.push('budget')
     }
     
     if (!data.timeline) {
-      if (!originalText.toLowerCase().includes('today') &&
-          !originalText.toLowerCase().includes('tomorrow') &&
-          !originalText.toLowerCase().includes('week') &&
-          !originalText.toLowerCase().includes('month') &&
-          !originalText.toLowerCase().includes('urgent') &&
-          !originalText.toLowerCase().includes('asap')) {
-        missing.push('timeline')
-      }
+      missing.push('timeline')
     }
     
     // Check for task-specific questions
     if (data.taskType && !data.additionalInfo?.specific) {
       const needsSpecific = getTaskSpecificQuestion(data.taskType)
-      if (needsSpecific && !hasTaskSpecificInfo(originalText, data.taskType)) {
+      if (needsSpecific) {
         missing.push('specific')
       }
     }
@@ -254,19 +289,50 @@ export function RequestFlow({ user }: RequestFlowProps) {
     return missing
   }
 
-  const getNextQuestion = (questionType: string) => {
+  const getNextQuestion = (questionType: string, taskType?: string) => {
     const questions = {
-      location: "To find the best providers near you, where are you located? (e.g., 'Downtown Seattle' or 'Brooklyn, NY')",
-      budget: "What's your budget for this service? You can say something like '$50-100' or 'around $75'.",
-      timeline: "When would you like this done? (e.g., 'today', 'this weekend', 'next week', 'flexible')",
-      specific: ""
-    }
-    
-    if (questionType === 'specific' && scopingData.taskType) {
-      return getTaskSpecificQuestion(scopingData.taskType) || ""
+      location: "Where are you located?",
+      budget: "What's your budget for this?",
+      timeline: "When do you need this done?",
+      specific: getTaskSpecificQuestion(taskType) || ""
     }
     
     return questions[questionType as keyof typeof questions] || ""
+  }
+
+  const getQuestionSuggestions = (questionType: string, taskType?: string) => {
+    const suggestions = {
+      location: ["Brooklyn, NY", "Downtown Seattle", "Austin, TX", "My home address"],
+      budget: ["$50-100", "Around $75", "Under $200", "Flexible budget"],
+      timeline: ["Today", "This weekend", "Next week", "Flexible timing"],
+      specific: getTaskSpecificSuggestions(taskType)
+    }
+    
+    return suggestions[questionType as keyof typeof suggestions] || []
+  }
+
+  const getTaskSpecificQuestion = (taskType?: string) => {
+    const questions: { [key: string]: string } = {
+      'Trash Removal': 'What type of items need removal?',
+      'Photography': 'What type of photography session?',
+      'Cleaning': 'What type of cleaning do you need?',
+      'Tech Support': 'What specific tech help do you need?',
+      'Moving Services': 'What size move is this?',
+      'Graphic Design': 'What type of design work?'
+    }
+    return questions[taskType || ''] || null
+  }
+
+  const getTaskSpecificSuggestions = (taskType?: string) => {
+    const suggestions: { [key: string]: string[] } = {
+      'Trash Removal': ['Household trash', 'Old furniture', 'Yard waste', 'Construction debris'],
+      'Photography': ['Portrait session', 'Event photography', 'Product photos', 'Headshots'],
+      'Cleaning': ['Deep cleaning', 'Regular maintenance', 'Move-out cleaning', 'Post-party cleanup'],
+      'Tech Support': ['WiFi setup', 'Computer repair', 'Smart home setup', 'Software help'],
+      'Moving Services': ['Studio apartment', '2-bedroom house', 'Just a few items', 'Full house'],
+      'Graphic Design': ['Logo design', 'Business cards', 'Website graphics', 'Social media posts']
+    }
+    return suggestions[taskType || ''] || []
   }
 
   const extractTaskType = (text: string) => {
@@ -274,11 +340,27 @@ export function RequestFlow({ user }: RequestFlowProps) {
     if (lowerText.includes('trash') || lowerText.includes('garbage')) return 'Trash Removal'
     if (lowerText.includes('photo') || lowerText.includes('photographer')) return 'Photography'
     if (lowerText.includes('clean') || lowerText.includes('cleaning')) return 'Cleaning'
-    if (lowerText.includes('wifi') || lowerText.includes('internet') || lowerText.includes('network')) return 'Tech Support'
-    if (lowerText.includes('design') || lowerText.includes('logo')) return 'Graphic Design'
+    if (lowerText.includes('wifi') || lowerText.includes('internet') || lowerText.includes('tech')) return 'Tech Support'
+    if (lowerText.includes('design') || lowerText.includes('logo') || lowerText.includes('graphic')) return 'Graphic Design'
     if (lowerText.includes('move') || lowerText.includes('moving')) return 'Moving Services'
     if (lowerText.includes('repair') || lowerText.includes('fix')) return 'Repair Services'
     return 'General Service'
+  }
+
+  const extractLocation = (text: string) => {
+    // Simple location extraction - could be enhanced with NLP
+    const locationPatterns = [
+      /in ([A-Z][a-z]+ ?[A-Z]*[a-z]*,? ?[A-Z]{2})/,
+      /at ([A-Z][a-z]+ ?[A-Z]*[a-z]*)/,
+      /([A-Z][a-z]+ ?[A-Z]*[a-z]*,? ?[A-Z]{2})/
+    ]
+    
+    for (const pattern of locationPatterns) {
+      const match = text.match(pattern)
+      if (match) return match[1]
+    }
+    
+    return null
   }
 
   const extractBudget = (text: string) => {
@@ -286,35 +368,28 @@ export function RequestFlow({ user }: RequestFlowProps) {
     return budgetMatch ? budgetMatch[0] : null
   }
 
-  const getTaskSpecificQuestion = (taskType: string) => {
-    const questions: { [key: string]: string } = {
-      'Trash Removal': 'What type of items need to be removed? (e.g., "household trash", "furniture", "yard waste")',
-      'Photography': 'What type of photography do you need? (e.g., "portrait session", "event photography", "product photos")',
-      'Cleaning': 'What type of cleaning service? (e.g., "deep clean", "regular maintenance", "move-out cleaning")',
-      'Tech Support': 'What specific tech issue needs help? (e.g., "WiFi setup", "computer repair", "smart home installation")',
-      'Moving Services': 'What size move is this? (e.g., "studio apartment", "3-bedroom house", "just a few items")'
-    }
-    return questions[taskType] || null
+  const extractTimeline = (text: string) => {
+    const lowerText = text.toLowerCase()
+    if (lowerText.includes('today') || lowerText.includes('asap')) return 'Today'
+    if (lowerText.includes('tomorrow')) return 'Tomorrow'
+    if (lowerText.includes('this week')) return 'This week'
+    if (lowerText.includes('next week')) return 'Next week'
+    if (lowerText.includes('weekend')) return 'This weekend'
+    return null
   }
 
-  const hasTaskSpecificInfo = (text: string, taskType: string) => {
-    const lowerText = text.toLowerCase()
+  const generateSummary = (data: ScopingData) => {
+    const parts = []
+    if (data.taskType) parts.push(`🔧 Service: ${data.taskType}`)
+    if (data.location) parts.push(`📍 Location: ${data.location}`)
+    if (data.budget) parts.push(`💰 Budget: ${data.budget}`)
+    if (data.timeline) parts.push(`⏰ Timeline: ${data.timeline}`)
+    if (data.additionalInfo?.specific) parts.push(`📝 Details: ${data.additionalInfo.specific}`)
     
-    if (taskType === 'Trash Removal') {
-      return lowerText.includes('furniture') || lowerText.includes('household') || lowerText.includes('yard')
-    }
-    if (taskType === 'Photography') {
-      return lowerText.includes('wedding') || lowerText.includes('portrait') || lowerText.includes('event')
-    }
-    if (taskType === 'Cleaning') {
-      return lowerText.includes('deep') || lowerText.includes('regular') || lowerText.includes('move-out')
-    }
-    
-    return false
+    return parts.join('\n')
   }
 
   const generateFinalRequest = async (data: ScopingData): Promise<ParsedRequest> => {
-    // Use AI to generate final structured request
     const { object } = await blink.ai.generateObject({
       prompt: `Based on this scoped service request, generate final structured data:
       
@@ -360,225 +435,239 @@ export function RequestFlow({ user }: RequestFlowProps) {
     }
   }
 
+  const handleSuggestionClick = (suggestion: string) => {
+    handleSubmit(suggestion)
+  }
+
   // If we have a complete request, show provider matches
   if (parsedRequest && requestId) {
     return <ProviderMatches request={parsedRequest} requestId={requestId} user={user} />
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
-      {/* Header */}
-      <div className="text-center space-y-4">
-        <h2 className="text-3xl font-bold">What do you need help with?</h2>
-        <p className="text-lg text-muted-foreground">
-          Tell me what you need - I'll ask a few questions to find you the perfect provider
-        </p>
-        <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Clock className="w-4 h-4" />
-          <span>60-second match guarantee</span>
-        </div>
-      </div>
-
-      {!showChat ? (
-        <>
-          {/* Initial Input Section */}
-          <Card className="border-2 border-dashed border-primary/20 hover:border-primary/40 transition-colors">
-            <CardContent className="p-6">
-              <div className="space-y-4">
-                <Textarea
-                  placeholder="e.g., I need help taking out my trash..."
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onKeyPress={handleKeyPress}
-                  className="min-h-[120px] text-lg border-0 focus-visible:ring-0 resize-none"
-                  disabled={isProcessing}
-                />
-                
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleVoiceInput}
-                      disabled={isProcessing || isListening}
-                      className="flex items-center gap-2"
-                    >
-                      {isListening ? (
-                        <>
-                          <MicOff className="w-4 h-4 text-red-500" />
-                          Listening...
-                        </>
-                      ) : (
-                        <>
-                          <Mic className="w-4 h-4" />
-                          Voice Input
-                        </>
-                      )}
-                    </Button>
-                    <span className="text-sm text-muted-foreground">
-                      {inputText.length}/500 characters
-                    </span>
-                  </div>
-                  
-                  <Button
-                    onClick={handleSubmit}
-                    disabled={!inputText.trim() || isProcessing}
-                    className="flex items-center gap-2"
-                  >
-                    {isProcessing ? (
-                      <>
-                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        Processing...
-                      </>
-                    ) : (
-                      <>
-                        <Send className="w-4 h-4" />
-                        Start Request
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Example Requests */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-center">Try these examples:</h3>
-            <div className="grid md:grid-cols-2 gap-4">
-              {exampleRequests.map((example, index) => (
-                <Card 
-                  key={index}
-                  className="cursor-pointer hover:shadow-md transition-shadow"
-                  onClick={() => setInputText(example)}
-                >
-                  <CardContent className="p-4">
-                    <p className="text-sm">"{example}"</p>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </div>
-        </>
-      ) : (
-        /* Chat Interface */
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <MessageCircle className="w-5 h-5 text-primary" />
-              AI Scoping Assistant
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-4 max-h-96 overflow-y-auto">
-              {messages.map((message, index) => (
-                <div
-                  key={index}
-                  className={`flex gap-3 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  {message.type === 'ai' && (
+    <div className="max-w-4xl mx-auto">
+      {/* Chat Container */}
+      <Card className="min-h-[600px] flex flex-col">
+        <CardContent className="flex-1 p-0">
+          {/* Messages Area */}
+          <div className="flex-1 p-6 space-y-6 max-h-[500px] overflow-y-auto">
+            {messages.map((message, index) => (
+              <div key={index}>
+                {message.type === 'system' && message.content === 'thinking' ? (
+                  <div className="flex gap-3 justify-start">
                     <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
                       <Bot className="w-4 h-4 text-primary" />
                     </div>
-                  )}
-                  <div
-                    className={`max-w-[80%] p-3 rounded-lg ${
-                      message.type === 'user'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted'
-                    }`}
-                  >
-                    <p className="text-sm">{message.content}</p>
-                    <p className="text-xs opacity-70 mt-1">
-                      {message.timestamp.toLocaleTimeString()}
-                    </p>
-                  </div>
-                  {message.type === 'user' && (
-                    <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
-                      <User className="w-4 h-4" />
-                    </div>
-                  )}
-                </div>
-              ))}
-              
-              {isProcessing && (
-                <div className="flex gap-3 justify-start">
-                  <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
-                    <Bot className="w-4 h-4 text-primary" />
-                  </div>
-                  <div className="bg-muted p-3 rounded-lg">
-                    <div className="flex items-center gap-2">
-                      <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                      <span className="text-sm">AI is thinking...</span>
+                    <div className="bg-muted p-4 rounded-2xl rounded-tl-md max-w-[80%]">
+                      <div className="flex items-center gap-2">
+                        <div className="flex gap-1">
+                          <div className="w-2 h-2 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                          <div className="w-2 h-2 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                          <div className="w-2 h-2 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                        </div>
+                        <span className="text-sm text-muted-foreground">AI is thinking...</span>
+                      </div>
                     </div>
                   </div>
+                ) : (
+                  <div className={`flex gap-3 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    {message.type === 'ai' && (
+                      <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
+                        <Bot className="w-4 h-4 text-primary" />
+                      </div>
+                    )}
+                    <div className="space-y-3 max-w-[80%]">
+                      <div
+                        className={`p-4 rounded-2xl ${
+                          message.type === 'user'
+                            ? 'bg-primary text-primary-foreground rounded-br-md'
+                            : 'bg-muted rounded-tl-md'
+                        }`}
+                      >
+                        <p className="whitespace-pre-line">{message.content}</p>
+                      </div>
+                      
+                      {/* Show suggestions */}
+                      {message.suggestions && message.suggestions.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="text-xs text-muted-foreground px-2">Quick options:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {message.suggestions.map((suggestion, suggestionIndex) => (
+                              <Button
+                                key={suggestionIndex}
+                                variant="outline"
+                                size="sm"
+                                className="text-xs h-8 rounded-full"
+                                onClick={() => handleSuggestionClick(suggestion)}
+                                disabled={isProcessing}
+                              >
+                                {suggestion}
+                              </Button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Show data summary */}
+                      {message.data?.summary && (
+                        <Card className="bg-primary/5 border-primary/20">
+                          <CardContent className="p-3">
+                            <div className="flex items-center gap-2 mb-2">
+                              <Zap className="w-4 h-4 text-primary" />
+                              <span className="text-sm font-medium">Request Summary</span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              {message.data.summary.taskType && (
+                                <div className="flex items-center gap-1">
+                                  <span className="text-muted-foreground">Service:</span>
+                                  <Badge variant="secondary" className="text-xs">{message.data.summary.taskType}</Badge>
+                                </div>
+                              )}
+                              {message.data.summary.location && (
+                                <div className="flex items-center gap-1">
+                                  <MapPin className="w-3 h-3 text-muted-foreground" />
+                                  <span className="text-xs">{message.data.summary.location}</span>
+                                </div>
+                              )}
+                              {message.data.summary.budget && (
+                                <div className="flex items-center gap-1">
+                                  <DollarSign className="w-3 h-3 text-muted-foreground" />
+                                  <span className="text-xs">{message.data.summary.budget}</span>
+                                </div>
+                              )}
+                              {message.data.summary.timeline && (
+                                <div className="flex items-center gap-1">
+                                  <Clock className="w-3 h-3 text-muted-foreground" />
+                                  <span className="text-xs">{message.data.summary.timeline}</span>
+                                </div>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )}
+                    </div>
+                    {message.type === 'user' && (
+                      <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
+                        <User className="w-4 h-4" />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+            
+            {/* Quick starters for first interaction */}
+            {showWelcome && messages.length === 0 && (
+              <div className="space-y-4">
+                <div className="text-center space-y-2">
+                  <h2 className="text-2xl font-bold">What can I help you with?</h2>
+                  <p className="text-muted-foreground">Choose a quick starter or describe what you need</p>
                 </div>
-              )}
-            </div>
+                <div className="grid grid-cols-2 gap-3">
+                  {quickStarters.map((starter, index) => (
+                    <Button
+                      key={index}
+                      variant="outline"
+                      className="h-auto p-4 justify-start text-left"
+                      onClick={() => handleSubmit(starter.text)}
+                    >
+                      <span className="text-lg mr-3">{starter.icon}</span>
+                      <span className="text-sm">{starter.text}</span>
+                      <ArrowRight className="w-4 h-4 ml-auto opacity-50" />
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            <div ref={messagesEndRef} />
+          </div>
 
-            {!isComplete && !isProcessing && currentQuestion && (
+          {/* Input Area */}
+          {!isComplete && (
+            <div className="border-t p-4">
               <div className="flex gap-2">
-                <Input
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  placeholder="Type your response..."
-                  className="flex-1"
-                  onKeyPress={handleKeyPress}
-                />
+                <div className="flex-1 relative">
+                  <Input
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    placeholder="Type your message..."
+                    className="pr-12 h-12 text-base"
+                    onKeyPress={handleKeyPress}
+                    disabled={isProcessing}
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="absolute right-1 top-1 h-10 w-10 p-0"
+                    onClick={handleVoiceInput}
+                    disabled={isProcessing || isListening}
+                  >
+                    {isListening ? (
+                      <MicOff className="w-4 h-4 text-red-500" />
+                    ) : (
+                      <Mic className="w-4 h-4" />
+                    )}
+                  </Button>
+                </div>
                 <Button 
-                  onClick={handleSubmit}
-                  disabled={!inputText.trim()}
-                  size="sm"
+                  onClick={() => handleSubmit()}
+                  disabled={!inputText.trim() || isProcessing}
+                  size="lg"
+                  className="h-12 px-6"
                 >
-                  <Send className="w-4 h-4" />
+                  {isProcessing ? (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4" />
+                  )}
                 </Button>
               </div>
-            )}
+            </div>
+          )}
 
-            {isComplete && (
-              <div className="text-center py-4">
-                <div className="inline-flex items-center gap-2 text-green-600 font-medium">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  Finding your perfect provider match...
-                </div>
+          {/* Processing indicator */}
+          {isComplete && (
+            <div className="border-t p-4">
+              <div className="flex items-center justify-center gap-3 text-primary">
+                <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                <span className="font-medium">Finding your perfect provider match...</span>
               </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Features */}
-      {!showChat && (
-        <div className="grid md:grid-cols-3 gap-6 pt-8">
-          <div className="text-center space-y-2">
-            <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center mx-auto">
-              <Sparkles className="w-6 h-6 text-primary" />
-            </div>
-            <h4 className="font-semibold">AI-Powered Scoping</h4>
-            <p className="text-sm text-muted-foreground">
-              Our AI asks smart questions to understand exactly what you need
-            </p>
+      <div className="grid md:grid-cols-3 gap-6 mt-8">
+        <div className="text-center space-y-2">
+          <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center mx-auto">
+            <Sparkles className="w-6 h-6 text-primary" />
           </div>
-          <div className="text-center space-y-2">
-            <div className="w-12 h-12 bg-accent/10 rounded-xl flex items-center justify-center mx-auto">
-              <Clock className="w-6 h-6 text-accent" />
-            </div>
-            <h4 className="font-semibold">Fast Matching</h4>
-            <p className="text-sm text-muted-foreground">
-              Get matched with qualified providers in under 60 seconds
-            </p>
-          </div>
-          <div className="text-center space-y-2">
-            <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center mx-auto">
-              <DollarSign className="w-6 h-6 text-primary" />
-            </div>
-            <h4 className="font-semibold">Transparent Pricing</h4>
-            <p className="text-sm text-muted-foreground">
-              AI-generated fair pricing with no hidden fees
-            </p>
-          </div>
+          <h4 className="font-semibold">Smart Conversations</h4>
+          <p className="text-sm text-muted-foreground">
+            AI asks the right questions to understand exactly what you need
+          </p>
         </div>
-      )}
+        <div className="text-center space-y-2">
+          <div className="w-12 h-12 bg-accent/10 rounded-xl flex items-center justify-center mx-auto">
+            <Clock className="w-6 h-6 text-accent" />
+          </div>
+          <h4 className="font-semibold">60-Second Matching</h4>
+          <p className="text-sm text-muted-foreground">
+            Get matched with qualified providers in under 60 seconds
+          </p>
+        </div>
+        <div className="text-center space-y-2">
+          <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center mx-auto">
+            <DollarSign className="w-6 h-6 text-primary" />
+          </div>
+          <h4 className="font-semibold">Transparent Pricing</h4>
+          <p className="text-sm text-muted-foreground">
+            AI-generated fair pricing with no hidden fees
+          </p>
+        </div>
+      </div>
     </div>
   )
 }
